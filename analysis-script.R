@@ -86,6 +86,10 @@ cln_train %>%
   group_by(sex) %>%
   count()
 
+cln_train %>%
+  group_by(work_class) %>%
+  count()
+
 
 cln_train %>%
   select(education, education_number) %>%
@@ -112,7 +116,7 @@ cln_train %>%
 # remove variable final_weight as it is a complex & unexplainable idea. Also it has MASSIVE variance. Almost no correlation. According to meta data (adult.names), this value is only applicable in its explanation to data points from within the same state and would be difficult to compare to across the states
 
 
-cln_train %>%
+cln_train <- cln_train %>%
   mutate(
     capital = case_when(
       capital_gain > 0 ~ 'gain',
@@ -122,4 +126,11 @@ cln_train %>%
     ),
     income_class = ifelse(salary_class == '<=50k',0,1)
   ) %>%
-   select(-capital_gain, -capital_loss, -salary_class, -final_weight)
+   select(-capital_gain, -capital_loss, -salary_class, -final_weight, -education)
+
+
+### EDA ----
+
+cln_train %>%
+  ggplot(aes(x = age, y = hours_per_week)) +
+  geom_hex()
