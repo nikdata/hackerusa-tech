@@ -1,0 +1,799 @@
+---
+title: "HackerU Technical Evaluation Report"
+author: "Nikhil Agarwal"
+date: "2/12/2021"
+output: 
+  bookdown::html_document2:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-library, include=FALSE, appendix = TRUE}
+# load libraries
+library(tidyverse)
+library(moments)
+```
+
+
+```{r data-load, include=FALSE, appendix=TRUE}
+
+# load data with specific column names
+
+column_names <- c('age','work_class','final_weight','education','education_number','marital_status','occupation','relationship','race','sex','capital_gain','capital_loss','hours_per_week','native_country','salary_class')
+
+# identify vector of possible values that denote NULL
+na_vals = c('', ' ', 'NA','N/A','?', 'unknown', 'Unknown')
+
+raw_train <- read_csv(file = here::here('data','adult.data'), col_names = column_names, na = na_vals)
+raw_test <- read_csv(file = here::here('data','adult.test'), col_names = column_names, na = na_vals, skip = 1) # we skip the first row since it contains non-relevant info
+
+```
+
+# Introduction
+
+The purpose of this report is to provide a high level overview of the dataset that identifies if a person makes more (or less than) \$50,000. Furthermore, two rudimentary predictive models have also been developed to classify the individuals. There are two datasets analyzed in this report: a training dataset consisting of over 32,000 observations and a test dataset that consists of over 16,000 observations. Finally, this activity does have specific requirements (outlined in the "Requirements" section) that need to be met. It is not our goal to build the most effective model, but rather, explain our approach.
+
+# Requirements
+
+For this activity, specific requirements have been identified:
+
+- remove any row that has NULL values
+- remove the variable `native-country`
+- engineer a new binary variable that uses a value of 1 if a person makes greater than \$50,000 per year otherwise 0
+- identify and resolve outliers, 'bogus' data
+- engineer other (i.e., new) predictors for downstream analysis
+- key visual plots and their respective takeaways
+- development of at least 1 classifier and why that specific classifier was chosen; (2-3 classifiers are recommended)
+- metric(s) used to assess the performance of each developed classifier
+- discussion of the pros/cons of each classifier
+
+Each of these requirements has either been met or exceeded in this report.
+
+# Data Cleaning
+
+## Value Mismatch & Missing Data
+The supplied datasets were definitely 'noisy' in terms of data validity and outliers. For instance, `NULL` values were represented by the character `?`.
+
+The output below shows a snippet of data and the data types of the imported training data.
+```{r preview-training, echo=FALSE, warning=FALSE, message=FALSE, fig.cap="Preview of Training Dataset"}
+dplyr::glimpse(raw_train)
+```
+
+The output below shows a snippet of data and the data types of the imported training data.
+```{r preview-test, echo=FALSE, warning=FALSE, message=FALSE, fig.cap="Preview of Test Dataset"}
+dplyr::glimpse(raw_test)
+```
+
+For the models we have planned, we'll need to convert the character type variables into dummy-encoded (n-1). The numerical variables will need to be centered and scaled for the planned logistic regression; this is not necessary for random forest (another planned model).
+
+```{r tr-missing, echo=FALSE, message=FALSE, warning=FALSE, appendix = TRUE}
+
+# missing observation count for training data
+
+tr_missing <- raw_train %>%
+  map_df(function(x) sum(is.na(x))) %>%
+  pivot_longer(cols = everything(), names_to = 'variable', values_to = 'number_missing') %>%
+  arrange(desc(number_missing)) %>%
+  filter(number_missing > 0) %>%
+  mutate(
+    percent_missing = paste0(round((number_missing / nrow(raw_train) * 100),2),'%')
+  )
+
+knitr::kable(tr_missing, caption = "Missing Observations from Training Data")
+
+```
+
+Table \@ref(tab:tr-missing) shows that the variables `occupation`, `work_class`, and `native_country` all have missing observations. Note that the variable `native_country` will not be used in this analysis.
+
+## Project requirements
+
+There are three key 'cleanup' tasks required by the technical evaluation: removing any row with NULL values, removing variable `native_country`, and engineering a new binary feature (called `income_class`) that replaces `salary_class`. The code below achieves all three and stores the modified dataframes with a new name.
+
+```{r key-cleanup, warning=FALSE, message=FALSE, appendix = TRUE}
+
+# removing native_country, creating income_class, and dropping any row with NULL values in both training & test dataset
+
+cln_train <- raw_train %>%
+  # remove native_country
+  dplyr::select(-native_country) %>% 
+  dplyr::mutate(
+    # create new variable for salary class
+    income_class = ifelse(salary_class == '>50K', 1, 0)
+  ) %>%
+  # drop NA rows
+  tidyr::drop_na()
+
+cln_test <- raw_test %>%
+  # remove native_country
+  dplyr::select(-native_country) %>% 
+  dplyr::mutate(
+    # create new variable for salary class
+    income_class = ifelse(salary_class == '>50K.', 1, 0)
+  ) %>%
+  # drop NA rows
+  tidyr::drop_na()
+
+```
+
+For the remainder of the project, we will not analyze the test dataset further to prevent information leakage. The test dataset will only be modified to meet the needs of the model during the prediction phase and will be assessed accordingly.
+
+# Exploratory Data Analysis
+
+## Salary Class
+
+Since we are predicting for the salary class, let's find out how many observations there are for each. Note that a well balanced dataset generally yields favorable predictable models. Figure \@ref(fig:resp-imbalance) illustrates this frequency count. Note how there is a fairly large imbalance in the data. Approximately 75% of the observations are related to the lower salary class.
+
+```{r resp-imbalance, echo=FALSE, appendix = TRUE, fig.cap  = "Salary Class Frequency Count"}
+
+# plot for response variable
+cln_train %>%
+  group_by(salary_class) %>%
+  count() %>%
+  ungroup() %>%
+  mutate(
+    pct = paste0(round((n / nrow(cln_train)) * 100),'%')
+  ) %>%
+  ggplot(aes(x = salary_class, y = n)) +
+  geom_bar(aes(fill = salary_class), stat = 'identity') +
+  geom_text(aes(label = n), vjust = -0.30, color = 'white') +
+  geom_text(aes(label = pct), vjust = 10, color = 'grey10') +
+  labs(x = '', y = 'Count', fill = 'Salary') +
+  theme(
+    plot.title = element_text(color = 'grey100'),
+    plot.background = element_rect(fill = 'grey10'),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(color = 'grey70'),
+    axis.title = element_text(color = 'grey100'),
+    strip.background = element_rect(fill = 'grey30'),
+    strip.text = element_text(color = 'grey80'),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = 'grey30', size = 0.2),
+    panel.grid.minor = element_line(color = 'grey30', size = 0.2),
+    legend.background = element_rect(fill = 'grey20'),
+    legend.key = element_blank(),
+    legend.title = element_text(color = 'grey80'),
+    legend.text = element_text(color = 'grey90'),
+    legend.position = c(0.9, 0.88)
+  )
+
+```
+
+
+## Statistical Summary
+
+```{r stat-summary, echo=FALSE, warning=FALSE, message=FALSE, appendix = TRUE}
+
+# tabular stat summary of numerical variables
+
+tbl_summary <- raw_train %>%
+  select(where(is.numeric)) %>%
+  pivot_longer(cols = everything()) %>%
+  group_by(name) %>%
+  summarize(
+    min = min(value),
+    avg = mean(value),
+    median = median(value),
+    max = max(value),
+    standard_deviation = sd(value),
+    variance = var(value),
+    `5th percentile` = quantile(value, p = 0.05),
+    `95th percentile` = quantile(value, p = 0.95),
+    skewnewss = moments::skewness(value),
+    kurtosis = moments::kurtosis(value)
+  )
+
+knitr::kable(tbl_summary, digits = 2, caption = "Statistical Summary of Training Data")
+
+```
+
+Table \@ref(tab:stat-summary) outlines the statistical summary of the numerical variables in the training dataset. Notice the extremly large variance for the variables `capital_gain`, `capital_loss`, `final_weight`. Per the documentation, the variable `final_weight` may not be very useful as its value represents a complex relationship that can only be used (correctly) for data points from within a state. Since we are unsure of what state each individual comes from, this variable may not be very meaningful. Furthermore, the large variance for `capital_gain` and `capital_loss` coupled with no information about the variable makes these two variables suspect and will be removed from the modeling phase.
+
+The variable `education_number` is essentially an ordinal encoded variable for the variable `education` (see Table \@ref(tab:distinct-edu)).
+
+```{r distinct-edu, echo=FALSE, appendix = TRUE}
+
+# unique values of education and education_number
+
+tbl_edu <- cln_train %>%
+  dplyr::select(education_number, education) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(education_number)
+
+knitr::kable(tbl_edu, caption = 'Education & Education Number')
+
+```
+
+Therefore, `education_number` seems to be a redundant variable and will be removed from the analysis. In its place, we will use the variable `education`.
+
+## Outliers
+
+Detecting and handling outliers can be a subjective endeavor even when coupled with objective methodology. For instance Cook's Distance can be used to identify if an observation is an outlier if the Cook's D value tends to be three times the mean. However, that is just a 'rule of thumb'. Another approach is to look at the 95th or 99th percentile values and use those as cutoffs (conversely, looking at the 5th or 10th percentile). Another more sophisticated approach is to use anomaly detection methods such as Isolation Forests to identify outliers. No matter what approach is chosen, domain knowledge is key to ensuring that outliers are identified correctly. For this analysis, we'll use the 5th and 95th percentiles as our cutoffs. In other words, observations for the variables `age` and `hours_per_week` that are below the 5th percentile (see Table \@ref(tab:stat-summary)) or above the 95th percentile will be adjusted to those values and marked as a 1 in the variables tracking the outlier status (`outlier_age` and `outlier_hpw`, respectively).
+
+## Character Variables
+
+Since there are so many character variables, it may be useful to know how many unique values are found within each character variable. If there are too many, then there is opportunity to alter the groupings to increase their usefulness. Table \@ref(tab:char-unique) summarizes the number of distinct observations for the different character type variables.
+
+```{r char-unique, echo=FALSE, warning=FALSE, message=FALSE, appendix = TRUE}
+
+# unique values in character variables 
+
+tbl_charunique <- cln_train %>%
+  select(where(is.character)) %>%
+  pivot_longer(cols = everything()) %>%
+  group_by(name) %>%
+  summarize(
+    num_unique = length(unique(value))
+  )
+
+knitr::kable(tbl_charunique, caption = 'Distinct Observations for Character Variables')
+```
+
+Notice how both `education` and `occupation` have more than 10 distinct values. Furthermore, the variable `marriage` has 7 different values. Table \@ref(tab:distinct-edu) describes the numerous different education levels. Our strategy will be to create a new variable called `education_level` and will consist of: 'dropout', 'hs_grad', 'associate', 'bachelor', 'postgrad'. You can find the conversion relationship in the Appendix. This will occur in the modeling phase.
+
+For the variables `occupation`, `work_class`, `marriage`, `relationship`, we will 'lump' some of the observations into a new category called 'other'. This will happen when the occurrence of a particular value is less than 5%.
+
+
+## Charts
+
+For the sake of brevity, not every plot made is in this document. However, we have picked out three interesting plots.
+
+### Hours Worked by Education Level
+
+In Figure \@ref(fig:plt-hoursbyedu), we can see the average hours worked weekly by education. It's interesting to see that Professional School and Doctorate graduates tend to work the most hours. Keep in mind that the data have not been adjusted due to outliers. Some blue-collar workers tend to be (from this author's experience) high school graduates or have attended some college. Since they may work in an assembly/manufacturing setting and be paid hourly, the average hours worked is closer to 40 - which makes sense.
+
+```{r plt-hoursbyedu, echo=FALSE, fig.cap="Average Hours Worked by Education", appendix = TRUE}
+
+# average hours by education
+
+cln_train %>%
+  group_by(education) %>%
+  summarize(
+    avg_hpw = mean(hours_per_week),
+    .groups = 'drop'
+  ) %>%
+  ggplot(aes(x = reorder(education, avg_hpw), y = avg_hpw)) +
+  geom_bar(stat = 'identity', fill = 'steelblue') +
+  labs(x = 'Education Level', y = 'Hours', title = 'Average Hours Per Week Worked') +
+  theme(
+    plot.title = element_text(color = 'grey100'),
+    plot.background = element_rect(fill = 'grey10'),
+    axis.text.x = element_text(color = 'grey70'),
+    axis.text.y = element_text(color = 'grey70'),
+    axis.title = element_text(color = 'grey100'),
+    strip.background = element_rect(fill = 'grey30'),
+    strip.text = element_text(color = 'grey80'),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = 'grey30', size = 0.2),
+    panel.grid.minor = element_line(color = 'grey30', size = 0.2)
+  ) +
+  coord_flip()
+
+```
+
+Figure \@ref(fig:plt-ageoccupation) describes the average age for occupation. It is not surprising to see that those individuals in executive level positions are older - experience with age tends to lead to more leadership positions. Surprisingly, however, the private home service individuals (e.g. maids, butlers) are also of older age. This is interesting, but also implies that individuals in these roles may come from all age groups.
+
+```{r plt-ageoccupation, echo=FALSE, fig.cap="Average Age by Occupation", appendix = TRUE}
+
+# average age by occupation plot
+
+cln_train %>%
+  group_by(occupation) %>%
+  summarize(
+    avg_age = mean(age),
+    .groups = 'drop'
+  ) %>%
+  ggplot(aes(x = reorder(occupation, avg_age), y = avg_age)) +
+  geom_bar(stat = 'identity', fill = 'steelblue') +
+  labs(x = 'Occupation', y = 'Age', title = 'Average Age by Occupation') +
+  theme(
+    plot.title = element_text(color = 'grey100'),
+    plot.background = element_rect(fill = 'grey10'),
+    axis.text.x = element_text(color = 'grey70'),
+    axis.text.y = element_text(color = 'grey70'),
+    axis.title = element_text(color = 'grey100'),
+    strip.background = element_rect(fill = 'grey30'),
+    strip.text = element_text(color = 'grey80'),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = 'grey30', size = 0.2),
+    panel.grid.minor = element_line(color = 'grey30', size = 0.2)
+  ) +
+  coord_flip()
+```
+
+Figure \@ref(fig:plt-vio) is quite interesting in the fact that it shows by occupation, the age range as well as the salary class. Note the Armed Forces role - it does not seem to pay much and has a much younger age group as compared to other occupations. Intuitively, the Armed Forces roles do not necessairly have high paying roles (keep in mind that this data are from 1996) as compared to the private industry. However, notice the wide range of age for private home service occupation. Virtually all of it is in the lower salary class - implying that this occupation is not a high paying one.
+
+```{r plt-vio, echo=FALSE, fig.cap = "Occupation Age Distribution by Salary Class", appendix = TRUE}
+
+# violin plot
+
+raw_train %>%
+  drop_na() %>%
+  ggplot(aes(x = occupation, y = age)) +
+  geom_violin(aes(fill = salary_class)) +
+  labs(x = '', y = 'Age', title = 'Occupation Age Distribution by Salary Class', fill = 'Salary') +
+  scale_fill_manual(values = c('steelblue','mediumseagreen')) +
+  theme(
+    plot.title = element_text(color = 'grey100'),
+    plot.background = element_rect(fill = 'grey10'),
+    axis.text.x = element_text(color = 'grey70', angle = 45, hjust = 1),
+    axis.text.y = element_text(color = 'grey70'),
+    axis.title = element_text(color = 'grey100'),
+    strip.background = element_rect(fill = 'grey30'),
+    strip.text = element_text(color = 'grey80'),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = 'grey30', size = 0.2),
+    panel.grid.minor = element_line(color = 'grey30', size = 0.2),
+    legend.background = element_rect(fill = 'grey20'),
+    legend.key = element_blank(),
+    legend.title = element_text(color = 'grey80'),
+    legend.text = element_text(color = 'grey90'),
+    legend.position = c(0.9, 0.88)
+  )
+```
+
+# Model Development
+
+For this report, two different models will be constructed: Logistic Regression & Random Forest. Both models will have simple hyper-tuning with a 5-fold 3-repeat cross validation to find the most optimal parameters. Furthermore, the training dataset will be split into two groups: a new training set consisting of 70% of the observations and a validation set consisting of the remaining 30%. Once the most optimal parameters are found, the model will be retrained on the full training dataset and then the test dataset will be used to make the final predictions and evaluations. The code for much of this can be found in the Appendix.
+
+Furthermore, due to the data imbalance (see Figure \@ref(fig:resp-imbalance)), we will use SMOTE to balance the training data prior to model training. This will ensure that the models have the ability to learn the nuances of both classes. 
+
+For both model types, the following metrics are computed:
+
+- Accuracy: provides a high level understanding of how well the model predictions are
+- AUC: provides insight on the model's ability to balance the true positive rate and the false positive rate (i.e., sensitivity & 1-specificity respectively)
+- F1 Score: a weighted average between precision & recall
+
+The Model Summary section discusses the model results and makes a final conclusion with justification.
+
+```{r def-recipe, echo=FALSE, warning=FALSE, message=FALSE, appendix = TRUE}
+
+# define splits
+
+library(tidymodels)
+
+set.seed(3372)
+df_split <- initial_split(data = cln_train, prop = 0.70, strata = salary_class)
+df_train <- training(df_split)
+df_valid <- testing(df_split)
+
+# define model recipe
+
+mdl_recipe <- recipes::recipe(income_class ~ . , df_train) %>%
+  # step_mutate(income_class = salary_class) %>%
+  step_bin2factor(income_class, levels = c('1','0')) %>%
+  # remove the variable, capital_gain, capital_loss
+  step_rm(capital_gain, capital_loss, salary_class, education_number, final_weight) %>%
+  # create new variable called education_level
+  step_mutate(
+    education_level = case_when(
+      education %in% c('Preschool','1st-4th','5th-6th','7th-8th','9th','10th','11th','12th') ~ 'dropout',
+      education %in% c('HS-grad', 'HS-Grad') ~ 'hs_grad',
+      education %in% c('Some-college','Assoc-acdm','Assoc-voc') ~ 'associate',
+      education %in% c('Bachelors') ~ 'bachelors',
+      TRUE ~ 'postgrad'
+    )
+  ) %>%
+  step_rm(education) %>%
+  # create outlier_age (true if age is < 20 or >62)
+  step_mutate(outlier_age = ifelse(age > 63 | age < 19, 1, 0), role = 'predictor') %>%
+  step_mutate(age = case_when(age > 63 ~ 63, age < 19 ~ 19, TRUE ~ age), role = 'predictor') %>%
+  # create outlier_hoursworked (true if hpw < 18 or > 60)
+  step_mutate(outlier_hoursworked = ifelse(hours_per_week < 18 | hours_per_week > 60, 1, 0), role = 'predictor') %>%
+  step_mutate(hours_per_week = case_when(hours_per_week < 18 ~ 18, hours_per_week > 60 ~ 60, TRUE ~ hours_per_week), role = 'predictor') %>%
+  # dummy encode work_class, martial_status, occupation, relationship, race
+  step_string2factor(work_class, marital_status, occupation, relationship, race, education_level, sex) %>%
+  step_other(marital_status, occupation, work_class, relationship) %>%
+  step_dummy(all_nominal(), -income_class) %>%
+  # normalize (center & scale) age and hours_per_week
+  step_normalize(age, hours_per_week) %>%
+  # SMOTE to balance data
+  themis::step_smote(income_class, skip = TRUE, seed = 7736) %>%
+  # prepare recipe
+  # prep(training = df_train, strings_as_factors = FALSE) %>%
+  identity()
+
+# mdl_recipe
+
+# summary(mdl_recipe)
+
+```
+
+```{r common-model-params, echo=FALSE, message=FALSE, warning=FALSE, appendix = TRUE}
+
+# define model eval params
+
+model_metrics <- metric_set(accuracy, roc_auc, f_meas)
+
+ctrl <- control_grid(save_pred = TRUE, verbose = TRUE)
+
+# define cross validation
+
+set.seed(2374)
+cv_splits <- rsample::vfold_cv(df_train, strata = income_class, v = 5, repeats = 3)
+
+```
+
+## Logistic Regression
+
+The logistic regression model is a fairly simple model that essentially tries to identify the log odds of the outcome as linear combination of the predictors. The log odds are essentially a logarithmic transformation of the odds. The odds are the ratio of the probability of a success (denoted by a TRUE or 1) over the probability of a failure (denoted by a FALSE or 0).
+
+For this model, we will use the R library {glm} and use many of its default parameters. To reduce overfitting, we will create 25 bootstrapped samples (sampling with replacement). We have also preprocessed the data prior to bootstrapping (see Appendix for code) and then fit the data to the model. Once we have assessed the training and validation data, we will then retrain the model on the full training dataset and then predict using the test dataset. This final assessment will provide a clear view on the model's performance on unseen data.
+
+```{r mdl-logreg, echo=FALSE, message=FALSE, warning=FALSE, appendix = TRUE, cache=TRUE}
+
+# first bake the datasets
+baked_train <- bake(prep(mdl_recipe, df_train, strings_as_factors = F), df_train)
+baked_valid <- bake(prep(mdl_recipe, df_train, strings_as_factors = F), df_valid)
+baked_test <- bake(prep(mdl_recipe, df_train, strings_as_factors = F), cln_test)
+baked_full_train <- bake(prep(mdl_recipe, df_train, strings_as_factors = F), cln_train)
+
+# bootstrap samples
+set.seed(133)
+# myboot <- bootstraps(baked_train)
+myboot <- bootstraps(df_train)
+
+# Logistic Regression
+
+lr_mdl <- logistic_reg() %>%
+  set_engine('glm')
+
+lr_wkflow <- workflow() %>%
+  add_recipe(mdl_recipe) # %>%
+  # add_formula(income_class ~ .)
+
+# use the bootstrap samples to assess model
+lr_rs <- lr_wkflow %>%
+  add_model(lr_mdl) %>%
+  fit_resamples(
+    resamples = myboot,
+    control = ctrl,
+    metrics = model_metrics
+  )
+
+lr_metrics_train <- lr_rs %>%
+  collect_metrics() %>%
+  select(.metric, mean) %>%
+  rename(metric = .metric, value = mean)
+
+# fit the trained model on validation data
+lr_fit_valid <- lr_wkflow %>%
+  add_model(lr_mdl) %>%
+  # fit(baked_train)
+  last_fit(df_split)
+
+# fit the trained model on full training data
+lr_final_fit <- lr_wkflow %>%
+  add_model(lr_mdl) %>%
+  fit(cln_train)
+
+# collect predictions & get metrics of validation data
+valid_preds <- lr_fit_valid %>%
+  collect_predictions()
+
+valid_metrics <- tibble(
+  dataset_type = 'validation',
+  accuracy = yardstick::accuracy(valid_preds, truth = income_class, estimate = .pred_class) %>% pull(.estimate),
+  roc_auc = yardstick::roc_auc(valid_preds, truth = income_class, .pred_1) %>% pull(.estimate),
+  f_meas = yardstick::f_meas(valid_preds, truth = income_class, estimate = .pred_class) %>% pull(.estimate)
+)
+
+# collect predictions & get metrics on test dataset
+test_pred_class <- predict(lr_final_fit$fit$fit, new_data = baked_test, type = 'class')
+test_pred_prob <- predict(lr_final_fit$fit$fit, new_data = baked_test, type = 'prob')
+
+test_pred_summary <- tibble(type = 'test',
+                             predicted_class = test_pred_class$.pred_class,
+                             predicted_prob_class0 = test_pred_prob$.pred_0,
+                             predicted_prob_class1 = test_pred_prob$.pred_1,
+                             actual_class = baked_test$income_class
+)
+
+# store metrics
+test_metrics <- tibble(
+  dataset_type = 'test',
+  accuracy = yardstick::accuracy(test_pred_summary, truth = actual_class, estimate = predicted_class) %>% pull(.estimate),
+  roc_auc = yardstick::roc_auc(test_pred_summary, truth = actual_class, predicted_prob_class1) %>% pull(.estimate),
+  f_meas = yardstick::f_meas(test_pred_summary, truth = actual_class, estimate = predicted_class) %>% pull(.estimate)
+)
+
+```
+
+
+### Model Results
+
+Let's take a look at our training results (note that we used bootstrap samples to reduce over-fitting).
+
+```{r lr_tr_results, echo=FALSE, warning=FALSE, message=FALSE, appendix = TRUE}
+
+# nicer metrics
+lr_tr_results <- lr_rs %>%
+  collect_metrics() %>%
+  select(.metric, mean) %>%
+  mutate(dataset_type = 'training') %>%
+  pivot_wider(
+    names_from = .metric,
+    values_from = mean
+  )
+
+knitr::kable(lr_tr_results, digits = 3, caption = "Logisitic Regression Training Data Results")
+```
+
+Our initial go with logistic regression is not that bad. The accuracy is almost 79% and the AUC (balance between sensitivity and 1-specificity) is just above 0.88 (a 1 would mean perfect fit).
+
+Let's take a look at the actual AUC curves for the resamples (see Figure \@ref(fig:auc-curves)).
+
+```{r auc-curves, echo=FALSE, warning=FALSE, message=FALSE, appendix = TRUE, fig.cap="AUC Curves"}
+
+# AUC curve for LR
+lr_rs %>%
+  collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(income_class, .pred_1) %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity, color = id)) +
+  geom_path(show.legend = F, alpha = 0.6, size = 1.2) +
+  geom_abline(lty = 2, color= 'grey80', size = 1.3) +
+  coord_equal() +
+  theme(
+    plot.title = element_text(color = 'grey100'),
+    plot.background = element_rect(fill = 'grey10'),
+    axis.text.x = element_text(color = 'grey70', angle = 45, hjust = 1),
+    axis.text.y = element_text(color = 'grey70'),
+    axis.title = element_text(color = 'grey100'),
+    strip.background = element_rect(fill = 'grey30'),
+    strip.text = element_text(color = 'grey80'),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = 'grey30', size = 0.2),
+    panel.grid.minor = element_line(color = 'grey30', size = 0.2),
+    legend.background = element_rect(fill = 'grey20'),
+    legend.key = element_blank(),
+    legend.title = element_text(color = 'grey80'),
+    legend.text = element_text(color = 'grey90'),
+    legend.position = c(0.9, 0.88)
+  )
+
+```
+The takeaway here is that our training data seems to be stabilized AUC values and they all perform fairly equal.
+
+We apply this trained model to our validation dataset and obtain the following results (Table \@ref(tab:lr-valid-results).
+
+```{r lr-valid-results, echo=FALSE, message=FALSE, warning=FALSE, appendix = TRUE}
+
+# validation metrics - LR
+knitr::kable(valid_metrics, digits = 3, caption = 'Validation Data Metrics - Logistic Regression')
+
+```
+
+The model performance on the validation dataset is similar to the training dataset. This is a good sign! We can see that the AUC metric and accuracy are almost equal (along with the F1 score).
+
+Finally, we retrain the model using the full training dataset (recall that we originally split it up to get a sub-sample used for training and another sub-sample for validation) and apply it to the final test dataset. Its result are in Table \2ref(tab:lr-test-results).
+
+```{r lr-test-results, echo=FALSE, message=FALSE, warning=FALSE, appendix = TRUE}
+
+# Test metrics - LR
+knitr::kable(test_metrics, digits = 3, caption = "Test Data Metrics - Logistic Regression")
+
+```
+
+Again, we see that the model performance on the test dataset continues to be similar to the previous results.
+
+Another way to dive deeper into the metrics is to look at the confusion matrix. This figure (see Table \@ref(fig:lr-conf-mat)) summarizes the predictions based on actual vs predicted.
+
+```{r lr-conf-mat, echo=FALSE, warning=FALSE, message=FALSE, appendix = TRUE, fig.cap="Confusion Matrix Test Dataset - Logistic Regression"}
+
+# confusion matrix - LR
+test_pred_summary %>%
+  conf_mat(truth = actual_class, estimate = predicted_class) %>%
+  autoplot(type = 'heatmap') +
+  scale_fill_gradient(low = 'steelblue1', high = 'steelblue4')
+
+```
+Where the numbers on the X-axis intersects with the corresponding Y-axis indicate the true values. Note how the model tends to misclassify income class when the true income class is below 50K.
+
+## Random Forest
+
+```{r rf-mdl, echo=FALSE, warning=FALSE, message=FALSE, appendix = TRUE, cache=TRUE}
+
+# Random Forest Model Development
+
+set.seed(1337)
+doParallel::registerDoParallel()
+
+rf_mdl <- rand_forest(mtry = tune(), trees = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("ranger", importance = 'impurity')
+
+# define parameter for hypertuning
+rf_grid <- expand.grid(mtry = c(5,6), trees = c(250,500))
+
+rf_workflow <- workflow() %>%
+  add_recipe(mdl_recipe) %>%
+  add_model(rf_mdl)
+
+# hypertuning
+rf_tune_results <- rf_workflow %>%
+  tune::tune_grid(
+    resamples = cv_splits,
+    grid = rf_grid,
+    metrics = model_metrics,
+    control = control_grid(save_pred = TRUE, verbose = TRUE)
+  )
+
+rf_cv_results <- rf_tune_results %>%
+  collect_metrics()
+
+rf_best <- rf_tune_results %>%
+  select_best(metric = 'accuracy')
+
+final_rf_wkflow <- rf_workflow %>%
+  finalize_workflow(rf_best)
+
+# fit workflow model on validation data
+valid_rf_fit <- final_rf_wkflow %>%
+  last_fit(df_split)
+
+rf_valid_preds <- valid_rf_fit %>%
+  collect_predictions()
+
+# validation metrics
+rf_valid_metrics <- tibble(
+  dataset_type = 'validation',
+  accuracy = yardstick::accuracy(rf_valid_preds, truth = income_class, estimate = .pred_class) %>% pull(.estimate),
+  roc_auc = yardstick::roc_auc(rf_valid_preds, truth = income_class, .pred_1) %>% pull(.estimate),
+  f_meas = yardstick::f_meas(rf_valid_preds, truth = income_class, estimate = .pred_class) %>% pull(.estimate)
+)
+
+# fit the trained model on full training data
+final_rfmdl <- rf_workflow %>%
+  finalize_workflow(rf_best) %>%
+  parsnip::fit(cln_train)
+
+rf_test_pred_class <- predict.model_fit(final_rfmdl$fit$fit, new_data = baked_test, type = 'class')
+rf_test_pred_prob <- predict.model_fit(final_rfmdl$fit$fit, new_data = baked_test, type = 'prob')
+
+rf_test_preds <- tibble(predicted_class = rf_test_pred_class$.pred_class,
+       pred_class1 = rf_test_pred_prob$.pred_1,
+       pred_class0 = rf_test_pred_prob$.pred_0,
+       actual_class = baked_test$income_class)
+
+# test metrics
+rf_test_metrics <- tibble(
+  dataset_type = 'test',
+  accuracy = yardstick::accuracy(rf_test_preds, truth = actual_class, estimate = predicted_class) %>% pull(.estimate),
+  roc_auc = yardstick::roc_auc(rf_test_preds, truth = actual_class, pred_class1) %>% pull(.estimate),
+  f_meas = yardstick::f_meas(rf_test_preds, truth = actual_class, estimate = predicted_class) %>% pull(.estimate)
+)
+```
+
+The Random Forest model attempts to build a large amount of "trees" with random predictors available at each split level. The predictor that yields the best improvement for the (based on the gini impurity index in our case) measure is chosen. In other words, at each split in the tree (e.g., decision), the model assesses the impact of each of potential predictors. The predictor that has the most significant impact in maximizing the gini gain will be chosen. Once all the trees are built, the overall 'average' of each tree's prediction is taken to produce the final answer. In some ways, this can be considered a fundamental ensemble model.
+
+One key benefit of random forests are their ability to not be as heavily influenced with outliers or multiple predictors that may have strong collinearity. However, random forests are not immune to such issues, the effects, however, are reduced as compared to logistic regression. The largest cost of this model, however and compared to logistic regression, is the reduced interpretability.
+
+For the random forest model, we are employing:
+
+- 5 fold, 3 repeat cross validation to pick the best tuning parameters (i.e., mtry, trees)
+- splitting the training dataset further into 2 datasets: training & validation
+- retraining the full training dataset just prior to making predictions on the test dataset
+
+## Model Results
+
+Table \@ref(tab:rf-cv-results) summarizes the cross validation results on the training dataset. The goal here is to pick the best combination of parameters based on a variety of metrics.
+
+```{r rf-cv-results, echo=FALSE, message=FALSE, warning=FALSE, appendix=TRUE}
+
+# CV results - RF
+rf_train_results <- rf_cv_results %>%
+  mutate(
+    dataset_type = 'training'
+  ) %>%
+  select(dataset_type, mtry, trees, .metric, mean) %>%
+  pivot_wider(
+    names_from = .metric,
+    values_from = mean
+  )
+
+knitr::kable(rf_train_results, digits = 3, caption = "Random Forest CV Results")
+  
+```
+
+Generally, the lower the value of the parameters, the lower the computational requirements. In this case, if we continue to use the 'accuracy' metric, it appears that an `mtry` value of 6 (meaning 6 random predictors at each split while building a tree) and the number of trees set to 250 will yield optimal accuracy with lower computational requirements.
+
+Figure \@ref(fig:rf-auc) shows the AUC curve for the cross validation results.
+```{r rf-auc, echo=FALSE, warning=FALSE, message=FALSE, appendix = TRUE, fig.cap="Random Forest CV AUC Curves"}
+
+# AUC plot for RF
+rf_tune_results %>%
+  collect_predictions() %>%
+  group_by(id) %>%
+  roc_curve(income_class, .pred_1) %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity, color = id)) +
+  geom_path(show.legend = F, alpha = 0.6, size = 1.2) +
+  geom_abline(lty = 2, color= 'grey80', size = 1.3) +
+  coord_equal() +
+  theme(
+    plot.title = element_text(color = 'grey100'),
+    plot.background = element_rect(fill = 'grey10'),
+    axis.text.x = element_text(color = 'grey70', angle = 45, hjust = 1),
+    axis.text.y = element_text(color = 'grey70'),
+    axis.title = element_text(color = 'grey100'),
+    strip.background = element_rect(fill = 'grey30'),
+    strip.text = element_text(color = 'grey80'),
+    panel.background = element_blank(),
+    panel.grid.major = element_line(color = 'grey30', size = 0.2),
+    panel.grid.minor = element_line(color = 'grey30', size = 0.2),
+    legend.background = element_rect(fill = 'grey20'),
+    legend.key = element_blank(),
+    legend.title = element_text(color = 'grey80'),
+    legend.text = element_text(color = 'grey90'),
+    legend.position = c(0.9, 0.88)
+  )
+```
+
+We will now apply this model to the validation dataset and we obtain the following results (see Table \@ref(tab:rf-valid-results)).
+
+```{r rf-valid-results, echo=FALSE, message=FALSE, warning=FALSE, appendix = TRUE}
+
+knitr::kable(rf_valid_metrics, digits = 3, caption = "Random Forest Validation Data Metrics")
+
+```
+
+Compared to the training results, our random forest model performs almost equally on the validation dataset.
+
+One benefit of using the random forest model is the ability to 'see' each predictor's importance. This importance can be used to determine if a predictor is wortwhile keeping (i.e., dimensionality reduction). Figure \@ref(fig:rf-imp-plt) is the variable importance plot that shows top 10 variables. From this plot, we can surmise that the predictor `marital_status_Married.civ.spouse` has a large impact on the final income. Furthermore, the same conclusion can be made for the predictor `age`. If you recall, both of these variables had an impact on salary class. For instance, Armed Forces members were younger and did not make more than \$50,000. 
+
+```{r rf-imp-plt, echo=FALSE, warning=FALSE, message=FALSE, appendix = TRUE, fig.cap="Variable Importance Plot"}
+
+# variable importance plot - RF
+valid_rf_fit %>%
+  pluck(".workflow", 1) %>%
+  pull_workflow_fit() %>%
+  vip::vip(num_features = 10)
+```
+
+After retraining the model for the full dataset, Table \@ref(tab:rf-tst-results) summarizes the model performance on the test dataset.
+
+```{r rf-tst-results, echo=FALSE, warning=FALSE, message=FALSE, appendix = TRUE}
+
+knitr::kable(rf_test_metrics, digits = 3, caption = "Random Forest Test Dataset Metrics")
+
+```
+
+Again, the metrics seem to be in-line with the model performances we saw on the training and validation datasets.
+
+Finally, let's take a look at the confusion matrix.
+
+```{r rf-conf-mat, echo=FALSE, message=FALSE, warning=FALSE, appendix = TRUE, fig.caption = "Confusion Matrix - Random Forest"}
+
+# confusion matrix - RF
+rf_test_preds %>%
+  conf_mat(truth = actual_class, estimate = predicted_class) %>%
+  autoplot(type = 'heatmap') +
+  scale_fill_gradient(low = 'steelblue1', high = 'steelblue4')
+```
+
+# Model Summary
+
+Table \@ref(tab:model-metrics-summary) summarizes the model results on the test dataset for both models.
+
+```{r model-metrics-summary, echo=FALSE, warning=FALSE, message=FALSE, appendix = TRUE}
+
+# both models metrics
+mdl_results <- bind_rows(test_metrics %>% mutate(model='logisitc') %>% select(-dataset_type), rf_test_metrics %>% mutate(model='random forest') %>% select(-dataset_type))
+
+knitr::kable(mdl_results, digits = 3, caption = "Model Performance")
+```
+
+From the table above, we can see that the Random Forest model performs almost comparably to the Logistic Regression model. However, the Random Forest model does have an edge on the Logistic Regression model in terms of accuracy. So which metric do we use?
+
+While all three metrics tell a story, the metric of choice really comes down to the business case. In this project, it appears that accuracy is the most important (we want to minimize wrong answers). Therefore, accuracy may be the best metric to go with. If the goal was to reduce false positives, then we could look at the F1 score or the sensitivity metric.
+
+# Next Steps & Conclusion
+
+Next steps would include further examination of each predictor - especially the ones we discarded for our analysis. Furthermore, we would explore adding in external features such as GDP, loans, etc. Last but not least, we would also explore other models such as SVMs or XGBoost.
+
+# Appendix: All code for this report
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
